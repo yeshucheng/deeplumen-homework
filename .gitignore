@@ -2,4 +2,5 @@
 /bazel-out
 /bazel-testlogs
 /bazel-bin
+/out*
 .env

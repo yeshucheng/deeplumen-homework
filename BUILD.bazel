@@ -1,12 +1,22 @@
 load("@crates//:defs.bzl", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 rust_binary(
-    name = "my_spider",
+    name = "my_spider_bin",
     srcs = glob(["src/*.rs"]),
     crate_root = "src/main.rs",
     edition = "2024",
     deps = all_crate_deps(
         normal = True,
     ),
+)
+
+sh_binary(
+    name = "my_spider",
+    srcs = ["run_chromedriver.sh"],
+    data = [
+        ":my_spider_bin",
+        ".env",
+    ],
 )

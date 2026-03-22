@@ -1,15 +1,11 @@
 mod login;
 
-use chrono::Local;
 use dotenvy::from_filename_override;
 use reqwest::header::{COOKIE, USER_AGENT};
 use rusqlite::{params, Connection};
-use spider::tokio;
 use spider::website::Website;
-use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::Path;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -314,100 +310,12 @@ async fn ensure_cookie(config: &mut Config) -> bool {
     }
 }
 
-fn sanitize_url_for_dir(url: &str) -> String {
-    let name = url
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-
-    let domain = name
-        .split('/')
-        .next()
-        .unwrap_or("site")
-        .split('?')
-        .next()
-        .unwrap_or("site")
-        .split('#')
-        .next()
-        .unwrap_or("site");
-
-    let domain: String = domain
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect();
-
-    if domain.is_empty() {
-        "site".to_string()
-    } else {
-        domain
-    }
-}
-
-fn filename_from_url(url: &str, index: usize) -> String {
-    let trimmed = url
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-
-    let path = trimmed
-        .split_once('/')
-        .map(|(_, rest)| rest)
-        .unwrap_or("index");
-
-    let path = path.split('?').next().unwrap_or(path);
-    let path = path.split('#').next().unwrap_or(path);
-
-    let mut name = if path.is_empty() {
-        "index".to_string()
-    } else {
-        path.to_string()
-    };
-
-    name = name.trim_end_matches('/').to_string();
-    name = name.replace('/', "_");
-
-    name = name
-        .chars()
-        .map(|c| match c {
-            '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect();
-
-    if name.is_empty() {
-        name = format!("page_{}", index);
-    }
-
-    if !name.ends_with(".html") {
-        name.push_str(".html");
-    }
-
-    name
-}
-
-fn make_output_dir(base_url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let site_name = sanitize_url_for_dir(base_url);
-    let output_dir = format!("output_{}_{}", site_name, Local::now().format("%Y%m%d"));
-
-    if !Path::new(&output_dir).exists() {
-        fs::create_dir_all(&output_dir)?;
-    }
-
-    Ok(output_dir)
-}
-
 async fn run_spider(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     print_cookie_summary(&config.cookie);
 
     if let Err(err) = debug_fetch(&config.cookie_verify_url, &config.cookie).await {
         eprintln!("debug fetch failed: {}", err);
     }
-
-    let output_dir = make_output_dir(&config.spider_base_url)?;
-    println!("[OUTPUT] html dir = {}", output_dir);
 
     let mut website = Website::new(&config.spider_base_url);
 
@@ -418,49 +326,7 @@ async fn run_spider(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     println!("[SPIDER] cookies configured, len={}", config.cookie.len());
 
     let mut website = website.build().expect("build website failed");
-
-    let mut rx = website.subscribe(16).expect("subscribe failed");
-    let output_dir_cloned = output_dir.clone();
-
-    let handle = tokio::spawn(async move {
-        let mut i: usize = 0;
-        let mut seen = HashSet::new();
-
-        while let Ok(page) = rx.recv().await {
-            let page_url = page.get_url().to_string();
-
-            if !seen.insert(page_url.clone()) {
-                continue;
-            }
-
-            println!("[PAGE] {}", page_url);
-
-            let html = page.get_html();
-            let mut filename = filename_from_url(&page_url, i);
-            let mut full_path = format!("{}/{}", output_dir_cloned, filename);
-
-            let mut dup = 1;
-            while Path::new(&full_path).exists() {
-                let base = filename.trim_end_matches(".html");
-                filename = format!("{}_{}.html", base, dup);
-                full_path = format!("{}/{}", output_dir_cloned, filename);
-                dup += 1;
-            }
-
-            if let Err(err) = fs::write(&full_path, html) {
-                eprintln!("保存失败 {}: {}", full_path, err);
-            } else {
-                println!("[HTML] 已保存 {}", full_path);
-            }
-
-            i += 1;
-        }
-    });
-
     website.crawl().await;
-    website.unsubscribe();
-
-    let _ = handle.await;
 
     let links: Vec<String> = website
         .get_links()
