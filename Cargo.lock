@@ -1799,10 +1799,12 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -1813,6 +1815,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -2169,9 +2172,8 @@ dependencies = [
 
 [[package]]
 name = "spider"
-version = "2.47.80"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca0f760a297ba846b8cf3bb27135493772cb57350c403201796590ecfc66757e"
+version = "2.47.79"
+source = "git+https://github.com/yeshucheng/spider.git?branch=native-tls-bazel#b2483282ddb61a5d768cf4d7839ed6bb93ea2968"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2206,9 +2208,8 @@ dependencies = [
 
 [[package]]
 name = "spider_agent_types"
-version = "2.47.80"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb86b248fb1653ad1b1d97655d48a9b71c2481be9bbd69ae88d2c3ab32aa26c"
+version = "2.47.79"
+source = "git+https://github.com/yeshucheng/spider.git?branch=native-tls-bazel#b2483282ddb61a5d768cf4d7839ed6bb93ea2968"
 dependencies = [
  "aho-corasick",
  "llm_models_spider",
