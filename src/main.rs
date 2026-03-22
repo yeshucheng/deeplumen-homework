@@ -1,13 +1,69 @@
 mod login;
 
 use chrono::Utc;
-use dotenvy::dotenv;
+use dotenvy::from_filename_override;
 use reqwest::header::{COOKIE, USER_AGENT};
 use rusqlite::{params, Connection};
 use spider::tokio;
 use spider::website::Website;
 use std::env;
 use std::fs;
+
+#[derive(Debug, Clone)]
+struct Config {
+    spider_base_url: String,
+    cookie_verify_url: String,
+    login_invalid_markers: Vec<String>,
+    spider_limit: u32,
+    sqlite_path: String,
+    cookie: String,
+}
+
+impl Config {
+    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let spider_base_url = required_env("SPIDER_BASE_URL")?;
+        let cookie_verify_url = required_env("COOKIE_VERIFY_URL")?;
+        let login_invalid_markers = parse_csv_env("LOGIN_INVALID_MARKERS");
+        let spider_limit = env::var("SPIDER_LIMIT")
+            .unwrap_or_else(|_| "20".to_string())
+            .parse::<u32>()
+            .map_err(|_| "SPIDER_LIMIT 必须是数字")?;
+        let sqlite_path =
+            env::var("SQLITE_PATH").unwrap_or_else(|_| "data/spider.db".to_string());
+        let cookie = env::var("COOKIE").unwrap_or_default();
+
+        Ok(Self {
+            spider_base_url,
+            cookie_verify_url,
+            login_invalid_markers,
+            spider_limit,
+            sqlite_path,
+            cookie,
+        })
+    }
+}
+
+fn required_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let value = env::var(key)
+        .map_err(|_| format!("缺少必填配置: {}，请在 .env 中设置", key))?;
+    let value = value.trim().to_string();
+
+    if value.is_empty() {
+        return Err(format!("配置为空: {}，请在 .env 中设置有效值", key).into());
+    }
+
+    Ok(value)
+}
+
+fn parse_csv_env(key: &str) -> Vec<String> {
+    env::var(key)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
 
 fn print_cookie_summary(cookie: &str) {
     let trimmed = cookie.trim();
@@ -85,7 +141,11 @@ fn save_links_to_sqlite(
     Ok(inserted)
 }
 
-async fn verify_cookie(cookie: &str) -> Result<bool, Box<dyn std::error::Error>> {
+async fn cookie_is_valid(
+    verify_url: &str,
+    cookie: &str,
+    invalid_markers: &[String],
+) -> Result<bool, Box<dyn std::error::Error>> {
     if cookie.trim().is_empty() {
         return Ok(false);
     }
@@ -95,7 +155,7 @@ async fn verify_cookie(cookie: &str) -> Result<bool, Box<dyn std::error::Error>>
         .build()?;
 
     let request = client
-        .get("https://www.jd.com")
+        .get(verify_url)
         .header(
             USER_AGENT,
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -107,7 +167,7 @@ async fn verify_cookie(cookie: &str) -> Result<bool, Box<dyn std::error::Error>>
     println!("url: {}", request.url());
     println!("method: {}", request.method());
 
-    for (k, v) in request.headers().iter() {
+    for (k, v) in request.headers() {
         if k.as_str().eq_ignore_ascii_case("cookie") {
             let cookie_str = v.to_str().unwrap_or("");
             println!("{}: <len={}>", k, cookie_str.len());
@@ -117,22 +177,29 @@ async fn verify_cookie(cookie: &str) -> Result<bool, Box<dyn std::error::Error>>
     }
 
     let resp = client.execute(request).await?;
-
     let status = resp.status();
+    let final_url = resp.url().to_string();
     let body = resp.text().await?;
 
     println!("cookie verify status: {}", status);
+    println!("cookie verify final url: {}", final_url);
     println!("cookie verify body length: {}", body.len());
 
     if !status.is_success() {
         return Ok(false);
     }
 
-    let invalid_markers = ["passport.jd.com", "请登录", "登录"];
     let body_lower = body.to_lowercase();
+    let final_url_lower = final_url.to_lowercase();
 
     for marker in invalid_markers {
-        if body.contains(marker) || body_lower.contains(&marker.to_lowercase()) {
+        let marker = marker.trim();
+        if marker.is_empty() {
+            continue;
+        }
+
+        let marker_lower = marker.to_lowercase();
+        if final_url_lower.contains(&marker_lower) || body_lower.contains(&marker_lower) {
             return Ok(false);
         }
     }
@@ -158,7 +225,7 @@ async fn debug_fetch(url: &str, cookie: &str) -> Result<(), Box<dyn std::error::
     println!("url: {}", request.url());
     println!("method: {}", request.method());
 
-    for (k, v) in request.headers().iter() {
+    for (k, v) in request.headers() {
         if k.as_str().eq_ignore_ascii_case("cookie") {
             let cookie_str = v.to_str().unwrap_or("");
             println!("{}: <len={}>", k, cookie_str.len());
@@ -180,12 +247,12 @@ async fn refresh_cookie() -> Option<String> {
 
     match login::login_and_capture_cookie().await {
         Ok(cookie) => {
-            if let Err(err) = login::save_env_value(".env", "JD_COOKIE", &cookie) {
+            if let Err(err) = login::save_env_value(".env", "COOKIE", &cookie) {
                 eprintln!("写入 .env 失败: {}", err);
                 return None;
             }
 
-            println!("JD_COOKIE 已写入 .env");
+            println!("COOKIE 已写入 .env");
             Some(cookie)
         }
         Err(err) => {
@@ -195,102 +262,72 @@ async fn refresh_cookie() -> Option<String> {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    dotenv().ok();
-
-    let base_url = env::var("SPIDER_BASE_URL")
-        .expect("SPIDER_BASE_URL not set in .env");
-
-    let limit: u32 = env::var("SPIDER_LIMIT")
-        .unwrap_or_else(|_| "20".to_string())
-        .parse()
-        .expect("SPIDER_LIMIT must be a number");
-
-    let db_path = env::var("SQLITE_PATH")
-        .unwrap_or_else(|_| "data/spider.db".to_string());
-
-    let jd_username = env::var("JD_USERNAME").ok();
-    let jd_password = env::var("JD_PASSWORD").ok();
-    let mut jd_cookie = env::var("JD_COOKIE").unwrap_or_default();
-
-    println!("start url: {}", base_url);
-    println!("limit: {}", limit);
-    println!("sqlite path: {}", db_path);
-
-    if let Some(username) = &jd_username {
-        if !username.is_empty() {
-            println!("username loaded");
-        }
-    }
-
-    if let Some(password) = &jd_password {
-        if !password.is_empty() {
-            println!("password loaded");
-        }
-    }
-
-    if jd_cookie.trim().is_empty() {
-        println!("JD_COOKIE 为空。");
+async fn ensure_cookie(config: &mut Config) -> bool {
+    if config.cookie.trim().is_empty() {
+        println!("COOKIE 为空。");
         match refresh_cookie().await {
-            Some(cookie) => jd_cookie = cookie,
-            None => return,
+            Some(cookie) => {
+                config.cookie = cookie;
+                true
+            }
+            None => false,
         }
     } else {
-        println!("检测到已有 JD_COOKIE，先验证是否有效...");
+        println!("检测到已有 COOKIE，先验证是否有效...");
 
-        match verify_cookie(&jd_cookie).await {
+        match cookie_is_valid(
+            &config.cookie_verify_url,
+            &config.cookie,
+            &config.login_invalid_markers,
+        )
+        .await
+        {
             Ok(true) => {
-                println!("已有 JD_COOKIE 有效，直接继续。");
+                println!("已有 COOKIE 有效，直接继续。");
+                true
             }
             Ok(false) => {
-                println!("已有 JD_COOKIE 无效，重新获取...");
+                println!("已有 COOKIE 无效，重新获取...");
                 match refresh_cookie().await {
-                    Some(cookie) => jd_cookie = cookie,
-                    None => return,
+                    Some(cookie) => {
+                        config.cookie = cookie;
+                        true
+                    }
+                    None => false,
                 }
             }
             Err(err) => {
-                eprintln!("验证 JD_COOKIE 时出错: {}", err);
-                println!("尝试重新获取新的 JD_COOKIE...");
+                eprintln!("验证 COOKIE 时出错: {}", err);
+                println!("尝试重新获取新的 COOKIE...");
                 match refresh_cookie().await {
-                    Some(cookie) => jd_cookie = cookie,
-                    None => return,
+                    Some(cookie) => {
+                        config.cookie = cookie;
+                        true
+                    }
+                    None => false,
                 }
             }
         }
     }
+}
 
-    print_cookie_summary(&jd_cookie);
+async fn run_spider(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    print_cookie_summary(&config.cookie);
 
-    if let Err(err) = debug_fetch("https://www.jd.com", &jd_cookie).await {
+    if let Err(err) = debug_fetch(&config.cookie_verify_url, &config.cookie).await {
         eprintln!("debug fetch failed: {}", err);
     }
 
-    let mut website = Website::new(&base_url);
+    let mut website = Website::new(&config.spider_base_url);
 
     website
-        .with_limit(limit)
-        .with_cookies(&jd_cookie);
+        .with_limit(config.spider_limit)
+        .with_cookies(&config.cookie);
 
-    println!("[SPIDER] cookies configured, len={}", jd_cookie.len());
+    println!("[SPIDER] cookies configured, len={}", config.cookie.len());
 
-    let mut website = website
-        .build()
-        .expect("build website failed");
-
-    let mut rx = website.subscribe(0).expect("subscribe failed");
-
-    let handle = tokio::spawn(async move {
-        while let Ok(page) = rx.recv().await {
-            println!("[VISITED] {}", page.get_url());
-        }
-    });
-
+    let mut website = website.build().expect("build website failed");
     website.crawl().await;
-
-    website.unsubscribe();
-    let _ = handle.await;
 
     let links: Vec<String> = website
         .get_links()
@@ -301,21 +338,38 @@ async fn main() {
     println!("done");
     println!("total links found: {}", links.len());
 
-    let mut conn = match init_db(&db_path) {
-        Ok(conn) => conn,
+    let mut conn = init_db(&config.sqlite_path)?;
+    let inserted = save_links_to_sqlite(&mut conn, &config.spider_base_url, links)?;
+
+    println!("[SQLITE] saved successfully");
+    println!("[SQLITE] newly inserted: {}", inserted);
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    from_filename_override(".env").ok();
+
+    let mut config = match Config::from_env() {
+        Ok(cfg) => cfg,
         Err(err) => {
-            eprintln!("init sqlite failed: {}", err);
+            eprintln!("读取配置失败: {}", err);
             return;
         }
     };
 
-    match save_links_to_sqlite(&mut conn, &base_url, links) {
-        Ok(inserted) => {
-            println!("[SQLITE] saved successfully");
-            println!("[SQLITE] newly inserted: {}", inserted);
-        }
-        Err(err) => {
-            eprintln!("save links to sqlite failed: {}", err);
-        }
+    println!("start url: {}", config.spider_base_url);
+    println!("limit: {}", config.spider_limit);
+    println!("sqlite path: {}", config.sqlite_path);
+    println!("cookie verify url: {}", config.cookie_verify_url);
+    println!("invalid markers count: {}", config.login_invalid_markers.len());
+
+    if !ensure_cookie(&mut config).await {
+        return;
+    }
+
+    if let Err(err) = run_spider(&config).await {
+        eprintln!("spider run failed: {}", err);
     }
 }
