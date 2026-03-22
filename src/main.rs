@@ -1,10 +1,8 @@
 mod login;
 
-use chrono::Utc;
 use dotenvy::from_filename_override;
 use reqwest::header::{COOKIE, USER_AGENT};
 use rusqlite::{params, Connection};
-use spider::tokio;
 use spider::website::Website;
 use std::env;
 use std::fs;
@@ -103,8 +101,11 @@ fn init_db(db_path: &str) -> Result<Connection, Box<dyn std::error::Error>> {
             url TEXT NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'visited',
-            discovered_at TEXT NOT NULL
+            discovered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
         );
+
+        CREATE INDEX IF NOT EXISTS idx_links_source_url ON links(source_url);
+        CREATE INDEX IF NOT EXISTS idx_links_discovered_at ON links(discovered_at);
         "#,
     )?;
 
@@ -116,21 +117,19 @@ fn save_links_to_sqlite(
     source_url: &str,
     links: Vec<String>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let now = Utc::now().to_rfc3339();
     let tx = conn.transaction()?;
-
     let mut inserted = 0usize;
 
     {
         let mut stmt = tx.prepare(
             r#"
-            INSERT OR IGNORE INTO links (url, source_url, status, discovered_at)
-            VALUES (?1, ?2, 'visited', ?3)
+            INSERT OR IGNORE INTO links (url, source_url, status)
+            VALUES (?1, ?2, 'visited')
             "#,
         )?;
 
         for link in links {
-            let affected = stmt.execute(params![link, source_url, now])?;
+            let affected = stmt.execute(params![link, source_url])?;
             if affected > 0 {
                 inserted += 1;
             }
