@@ -1,0 +1,16 @@
+[package]
+name = "my-spider"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spider = { version = "2", features = ["chrome", "chrome_intercept", "cookies", "chrome_stealth"] }
+tokio = { version = "1", features = ["full"] }
+dotenvy = "0.15"
+
+thirtyfour = { version = "0.36", default-features = false, features = ["native-tls", "component"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = "0.4"

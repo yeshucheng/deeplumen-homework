@@ -1,0 +1,5 @@
+/target
+/bazel-out
+/bazel-testlogs
+/bazel-bin
+.env
